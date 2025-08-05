@@ -164,12 +164,20 @@ class CapitalComAPIClient:
         return b64encode(ciphertext).decode("utf-8")
 
     def _create_session(self, use_encryption: bool = True):
-        """Creates a new trading session and stores authentication tokens."""
+        """
+        Creates a new trading session, stores authentication tokens,
+        and clears the password from memory upon success.
+        """
         url = f"{self.base_url}/session"
 
         if use_encryption:
-            logger.info("Creating session with encrypted password.")
+            logger.info("Attempting to create session with encrypted password.")
             try:
+                if self._password is None:
+                    raise ValueError(
+                        "Password is not available for re-authentication. Please create a new client instance."
+                    )
+
                 key, ts = self._get_encryption_key()
                 encrypted_pass = self._encrypt_password(key, ts)
                 payload = {
@@ -181,6 +189,7 @@ class CapitalComAPIClient:
                 logger.error(
                     f"Password encryption failed, falling back to plain text. Error: {e}"
                 )
+                # Fallback to non-encrypted on failure
                 payload = {
                     "identifier": self._identifier,
                     "password": self._password,
@@ -201,12 +210,20 @@ class CapitalComAPIClient:
         self.security_token = response.headers.get("X-SECURITY-TOKEN")
 
         if not self.cst or not self.security_token:
-            raise Exception("Failed to retrieve authentication tokens.")
+            raise Exception(
+                "Failed to retrieve authentication tokens from session response."
+            )
 
         self.session.headers.update(
             {"CST": self.cst, "X-SECURITY-TOKEN": self.security_token}
         )
-        logger.success("Session created successfully.")
+
+        # --- SECURITY ENHANCEMENT ---
+        # After successful authentication, clear the password from the object's memory.
+        # This prevents the password from lingering longer than necessary.
+        self._password = None
+
+        logger.success("Session created successfully and password cleared from memory.")
 
     def _request(
         self, method: str, endpoint: str, auto_renew_session: bool = True, **kwargs
@@ -232,6 +249,19 @@ class CapitalComAPIClient:
         except Exception as e:
             logger.error(f"An unexpected error occurred during request to {url}: {e}")
             raise
+
+    def ping(self) -> bool:
+        """
+        Checks if the current session is active by pinging the server.
+
+        Returns:
+            bool: True if the session is active (receives 'OK' status), False otherwise.
+        """
+        try:
+            response = self._request("GET", "ping")
+            return response.get("status") == "OK"
+        except Exception:
+            return False
 
     def get_session_details(self) -> SessionDetails:
         """Returns details of the current session (GET /session)."""
