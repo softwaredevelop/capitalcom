@@ -91,14 +91,14 @@ class DealingRules(BaseModel):
 
 class Snapshot(BaseModel):
     market_status: str = Field(alias="marketStatus")
-    net_change: float = Field(alias="netChange")
-    percentage_change: float = Field(alias="percentageChange")
-    update_time: str = Field(alias="updateTime")
+    net_change: Optional[float] = Field(alias="netChange", default=None)
+    percentage_change: Optional[float] = Field(alias="percentageChange", default=None)
+    update_time: Optional[str] = Field(alias="updateTime", default=None)
     delay_time: int = Field(alias="delayTime")
-    bid: Optional[float]
-    offer: Optional[float]
-    high: Optional[float]
-    low: Optional[float]
+    bid: Optional[float] = None
+    offer: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
     decimal_places_factor: int = Field(alias="decimalPlacesFactor")
     scaling_factor: int = Field(alias="scalingFactor")
     market_modes: List[str] = Field(alias="marketModes")
