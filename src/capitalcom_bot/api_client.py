@@ -62,7 +62,7 @@ class Instrument(BaseModel):
     margin_factor: float = Field(alias="marginFactor")
     margin_factor_unit: str = Field(alias="marginFactorUnit")
     opening_hours: OpeningHours = Field(alias="openingHours")
-    country: str
+    country: Optional[str] = None
     overnight_fee: OvernightFee = Field(alias="overnightFee")
 
 
@@ -110,13 +110,21 @@ class FullMarketDetails(BaseModel):
     snapshot: Snapshot
 
 
+class MarketSummary(BaseModel):
+    epic: str
+    instrument_name: str = Field(alias="instrumentName")
+    instrument_type: str = Field(alias="instrumentType")
+    market_status: str = Field(alias="marketStatus")
+    bid: Optional[float]
+    offer: Optional[float]
+    update_time: str = Field(alias="updateTime")
+
+
 class SearchMarketsResponse(BaseModel):
-    markets: List[FullMarketDetails]
+    markets: List[MarketSummary]
 
 
 # --- API Client Class ---
-
-
 class CapitalComAPIClient:
     def __init__(
         self, identifier: str, password: str, api_key: str, demo_mode: bool = True
@@ -151,16 +159,13 @@ class CapitalComAPIClient:
         """Encrypts the password using the provided public key, mirroring the Java example."""
         message = f"{self._password}|{timestamp}".encode("utf-8")
         encoded_message = b64encode(message)
-
         pem_key = f"-----BEGIN PUBLIC KEY-----\n{public_key_str}\n-----END PUBLIC KEY-----".encode(
             "utf-8"
         )
         public_key = serialization.load_pem_public_key(
             pem_key, backend=default_backend()
         )
-
         ciphertext = public_key.encrypt(encoded_message, padding.PKCS1v15())
-
         return b64encode(ciphertext).decode("utf-8")
 
     def _create_session(self, use_encryption: bool = True):
@@ -189,7 +194,6 @@ class CapitalComAPIClient:
                 logger.error(
                     f"Password encryption failed, falling back to plain text. Error: {e}"
                 )
-                # Fallback to non-encrypted on failure
                 payload = {
                     "identifier": self._identifier,
                     "password": self._password,
@@ -218,9 +222,6 @@ class CapitalComAPIClient:
             {"CST": self.cst, "X-SECURITY-TOKEN": self.security_token}
         )
 
-        # --- SECURITY ENHANCEMENT ---
-        # After successful authentication, clear the password from the object's memory.
-        # This prevents the password from lingering longer than necessary.
         self._password = None
 
         logger.success("Session created successfully and password cleared from memory.")
@@ -251,12 +252,7 @@ class CapitalComAPIClient:
             raise
 
     def ping(self) -> bool:
-        """
-        Checks if the current session is active by pinging the server.
-
-        Returns:
-            bool: True if the session is active (receives 'OK' status), False otherwise.
-        """
+        """Checks if the current session is active by pinging the server."""
         try:
             response = self._request("GET", "ping")
             return response.get("status") == "OK"
@@ -308,10 +304,8 @@ class CapitalComAPIClient:
         """Returns historical price data for a particular instrument."""
         params = {"resolution": resolution, "max": max_items}
         data = self._request("GET", f"prices/{epic}", params=params)
-
         if not data.get("prices"):
             return pd.DataFrame()
-
         processed = [
             {
                 "timestamp": p["snapshotTimeUTC"],
@@ -324,11 +318,9 @@ class CapitalComAPIClient:
             for p in data["prices"]
             if p.get("openPrice") and p["openPrice"].get("bid")
         ]
-
         df = pd.DataFrame(processed)
         if df.empty:
             return df
-
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df.set_index("timestamp", inplace=True)
         return df
@@ -346,7 +338,6 @@ class CapitalComAPIClient:
         logger.info("Closing session...")
         try:
             self._request("DELETE", "session", auto_renew_session=False)
-
             self.cst = None
             self.security_token = None
             self.session.headers.pop("CST", None)
