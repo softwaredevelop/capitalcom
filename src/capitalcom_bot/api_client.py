@@ -115,12 +115,46 @@ class MarketSummary(BaseModel):
     instrument_name: str = Field(alias="instrumentName")
     instrument_type: str = Field(alias="instrumentType")
     market_status: str = Field(alias="marketStatus")
-    bid: Optional[float]
-    offer: Optional[float]
+    bid: Optional[float] = None
+    offer: Optional[float] = None
     update_time: str = Field(alias="updateTime")
+    high: Optional[float] = None
+    low: Optional[float] = None
+    percentage_change: Optional[float] = Field(alias="percentageChange", default=None)
+    net_change: Optional[float] = Field(alias="netChange", default=None)
+    market_modes: Optional[List[str]] = Field(alias="marketModes", default=None)
 
 
 class SearchMarketsResponse(BaseModel):
+    markets: List[MarketSummary]
+
+
+class GetMarketsByEpicsResponse(BaseModel):
+    market_details: List[FullMarketDetails] = Field(alias="marketDetails")
+
+
+class WatchlistItem(BaseModel):
+    id: str
+    name: str
+    editable: bool
+    deleteable: bool
+    default_system_watchlist: bool = Field(alias="defaultSystemWatchlist")
+
+
+class GetWatchlistsResponse(BaseModel):
+    watchlists: List[WatchlistItem]
+
+
+class CreateWatchlistResponse(BaseModel):
+    watchlist_id: str = Field(alias="watchlistId")
+    status: str
+
+
+class StatusResponse(BaseModel):
+    status: str
+
+
+class GetWatchlistDetailsResponse(BaseModel):
     markets: List[MarketSummary]
 
 
@@ -137,13 +171,10 @@ class CapitalComAPIClient:
         self._identifier = identifier
         self._password = password
         self._api_key = api_key
-
         self.session = requests.Session()
         self.session.headers.update({"X-CAP-API-KEY": self._api_key})
-
         self.cst: Optional[str] = None
         self.security_token: Optional[str] = None
-
         logger.info("Initializing API client...")
         self._create_session(use_encryption=True)
 
@@ -174,7 +205,6 @@ class CapitalComAPIClient:
         and clears the password from memory upon success.
         """
         url = f"{self.base_url}/session"
-
         if use_encryption:
             logger.info("Attempting to create session with encrypted password.")
             try:
@@ -182,7 +212,6 @@ class CapitalComAPIClient:
                     raise ValueError(
                         "Password is not available for re-authentication. Please create a new client instance."
                     )
-
                 key, ts = self._get_encryption_key()
                 encrypted_pass = self._encrypt_password(key, ts)
                 payload = {
@@ -206,30 +235,23 @@ class CapitalComAPIClient:
                 "password": self._password,
                 "encryptedPassword": False,
             }
-
         response = self.session.post(url, json=payload)
         response.raise_for_status()
-
         self.cst = response.headers.get("CST")
         self.security_token = response.headers.get("X-SECURITY-TOKEN")
-
         if not self.cst or not self.security_token:
             raise Exception(
                 "Failed to retrieve authentication tokens from session response."
             )
-
         self.session.headers.update(
             {"CST": self.cst, "X-SECURITY-TOKEN": self.security_token}
         )
-
         self._password = None
-
         logger.success("Session created successfully and password cleared from memory.")
 
     def _request(
         self, method: str, endpoint: str, auto_renew_session: bool = True, **kwargs
-    ) -> dict:
-        """A wrapper for making authenticated requests."""
+    ) -> Any:
         url = f"{self.base_url}/{endpoint}"
         try:
             response = self.session.request(method, url, **kwargs)
@@ -288,6 +310,13 @@ class CapitalComAPIClient:
         data = self._request("GET", "markets", params={"searchTerm": search_term})
         return SearchMarketsResponse(**data)
 
+    def get_markets_by_epics(self, epics: List[str]) -> GetMarketsByEpicsResponse:
+        if not 1 <= len(epics) <= 50:
+            raise ValueError("The number of epics must be between 1 and 50.")
+        logger.info(f"Fetching market details for {len(epics)} epics in bulk...")
+        data = self._request("GET", "markets", params={"epics": ",".join(epics)})
+        return GetMarketsByEpicsResponse(**data)
+
     def get_full_market_details(self, epic: str) -> FullMarketDetails:
         """Returns detailed information for a single market (GET /markets/{epic})."""
         logger.info(f"Fetching full market details for epic: {epic}")
@@ -316,7 +345,7 @@ class CapitalComAPIClient:
                 "volume": p["lastTradedVolume"],
             }
             for p in data["prices"]
-            if p.get("openPrice") and p["openPrice"].get("bid")
+            if p.get("openPrice") and p.get("openPrice").get("bid")
         ]
         df = pd.DataFrame(processed)
         if df.empty:
@@ -325,13 +354,41 @@ class CapitalComAPIClient:
         df.set_index("timestamp", inplace=True)
         return df
 
-    def ping_rest_session(self):
-        """Pings the server to keep the REST session alive."""
-        try:
-            self._request("GET", "ping")
-            logger.debug("REST session ping successful.")
-        except Exception as e:
-            logger.warning(f"REST session ping failed: {e}")
+    def get_watchlists(self) -> GetWatchlistsResponse:
+        logger.info("Fetching all watchlists...")
+        data = self._request("GET", "watchlists")
+        return GetWatchlistsResponse(**data)
+
+    def create_watchlist(
+        self, name: str, epics: List[str] = None
+    ) -> CreateWatchlistResponse:
+        logger.info(f"Creating new watchlist with name: '{name}'...")
+        payload = {"name": name}
+        if epics:
+            payload["epics"] = epics
+        data = self._request("POST", "watchlists", json=payload)
+        return CreateWatchlistResponse(**data)
+
+    def get_watchlist_details(self, watchlist_id: str) -> GetWatchlistDetailsResponse:
+        logger.info(f"Fetching details for watchlist ID: {watchlist_id}...")
+        data = self._request("GET", f"watchlists/{watchlist_id}")
+        return GetWatchlistDetailsResponse(**data)
+
+    def add_to_watchlist(self, watchlist_id: str, epic: str) -> StatusResponse:
+        logger.info(f"Adding epic '{epic}' to watchlist '{watchlist_id}'...")
+        payload = {"epic": epic}
+        data = self._request("PUT", f"watchlists/{watchlist_id}", json=payload)
+        return StatusResponse(**data)
+
+    def remove_from_watchlist(self, watchlist_id: str, epic: str) -> StatusResponse:
+        logger.info(f"Removing epic '{epic}' from watchlist '{watchlist_id}'...")
+        data = self._request("DELETE", f"watchlists/{watchlist_id}/{epic}")
+        return StatusResponse(**data)
+
+    def delete_watchlist(self, watchlist_id: str) -> StatusResponse:
+        logger.warning(f"Deleting entire watchlist with ID: '{watchlist_id}'...")
+        data = self._request("DELETE", f"watchlists/{watchlist_id}")
+        return StatusResponse(**data)
 
     def close_session(self):
         """Logs out of the current session (DELETE /session)."""
