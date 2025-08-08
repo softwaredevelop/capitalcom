@@ -1,3 +1,5 @@
+# src/capitalcom_bot/api_client.py
+
 from base64 import b64encode
 from typing import Any, Dict, List, Optional
 
@@ -9,7 +11,9 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from loguru import logger
 from pydantic import BaseModel, Field
 
-# --- Pydantic Models ---
+# ==============================================================================
+# --- Pydantic Models for API Responses ---
+# ==============================================================================
 
 
 class SessionDetails(BaseModel):
@@ -158,11 +162,31 @@ class GetWatchlistDetailsResponse(BaseModel):
     markets: List[MarketSummary]
 
 
+# ==============================================================================
 # --- API Client Class ---
+# ==============================================================================
+
+
 class CapitalComAPIClient:
+    """
+    A Python client for the Capital.com REST API.
+
+    This class handles session management, authentication (including encrypted password),
+    and provides methods for interacting with the main API endpoints.
+    """
+
     def __init__(
         self, identifier: str, password: str, api_key: str, demo_mode: bool = True
     ):
+        """
+        Initializes the client and creates a new session.
+
+        Args:
+            identifier (str): Your Capital.com login email.
+            password (str): The custom password for your API key.
+            api_key (str): Your generated API key.
+            demo_mode (bool): If True, connects to the demo environment.
+        """
         self.base_url = (
             "https://demo-api-capital.backend-capital.com/api/v1"
             if demo_mode
@@ -178,6 +202,10 @@ class CapitalComAPIClient:
         logger.info("Initializing API client...")
         self._create_session(use_encryption=True)
 
+    # --------------------------------------------------------------------------
+    # --- Internal Helper Methods ---
+    # --------------------------------------------------------------------------
+
     def _get_encryption_key(self) -> tuple[str, int]:
         """Fetches the public RSA key and timestamp for password encryption."""
         url = f"{self.base_url}/session/encryptionKey"
@@ -187,7 +215,7 @@ class CapitalComAPIClient:
         return data["encryptionKey"], data["timeStamp"]
 
     def _encrypt_password(self, public_key_str: str, timestamp: int) -> str:
-        """Encrypts the password using the provided public key, mirroring the Java example."""
+        """Encrypts the password using the provided public key."""
         message = f"{self._password}|{timestamp}".encode("utf-8")
         encoded_message = b64encode(message)
         pem_key = f"-----BEGIN PUBLIC KEY-----\n{public_key_str}\n-----END PUBLIC KEY-----".encode(
@@ -200,10 +228,7 @@ class CapitalComAPIClient:
         return b64encode(ciphertext).decode("utf-8")
 
     def _create_session(self, use_encryption: bool = True):
-        """
-        Creates a new trading session, stores authentication tokens,
-        and clears the password from memory upon success.
-        """
+        """Creates a new trading session, stores tokens, and clears the password."""
         url = f"{self.base_url}/session"
         if use_encryption:
             logger.info("Attempting to create session with encrypted password.")
@@ -235,6 +260,7 @@ class CapitalComAPIClient:
                 "password": self._password,
                 "encryptedPassword": False,
             }
+
         response = self.session.post(url, json=payload)
         response.raise_for_status()
         self.cst = response.headers.get("CST")
@@ -252,6 +278,7 @@ class CapitalComAPIClient:
     def _request(
         self, method: str, endpoint: str, auto_renew_session: bool = True, **kwargs
     ) -> Any:
+        """A generic wrapper for making authenticated requests."""
         url = f"{self.base_url}/{endpoint}"
         try:
             response = self.session.request(method, url, **kwargs)
@@ -259,7 +286,9 @@ class CapitalComAPIClient:
             return response.json()
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401 and auto_renew_session:
-                logger.warning("Session expired or invalid. Re-authenticating...")
+                logger.warning(
+                    "Session expired or invalid. Attempting to re-authenticate..."
+                )
                 self._create_session()
                 response = self.session.request(method, url, **kwargs)
                 response.raise_for_status()
@@ -273,8 +302,17 @@ class CapitalComAPIClient:
             logger.error(f"An unexpected error occurred during request to {url}: {e}")
             raise
 
+    # --------------------------------------------------------------------------
+    # --- Session and Account Endpoints ---
+    # --------------------------------------------------------------------------
+
     def ping(self) -> bool:
-        """Checks if the current session is active by pinging the server."""
+        """
+        Checks if the current session is active by pinging the server.
+
+        Returns:
+            bool: True if the session is active, False otherwise.
+        """
         try:
             response = self._request("GET", "ping")
             return response.get("status") == "OK"
@@ -282,35 +320,97 @@ class CapitalComAPIClient:
             return False
 
     def get_session_details(self) -> SessionDetails:
-        """Returns details of the current session (GET /session)."""
+        """
+        Retrieves details of the current session, including account and client IDs.
+
+        Returns:
+            SessionDetails: A Pydantic model with session information.
+        """
         data = self._request("GET", "session")
         return SessionDetails(**data)
 
     def switch_active_account(self, account_id: str) -> Dict[str, Any]:
-        """Switches to another account within the session (PUT /session)."""
+        """
+        Switches the active trading account for the current session.
+
+        Args:
+            account_id (str): The ID of the account to switch to.
+
+        Returns:
+            Dict[str, Any]: The raw JSON response from the server.
+        """
         payload = {"accountId": account_id}
         response_json = self._request("PUT", "session", json=payload)
         logger.success(f"Active account successfully switched to: {account_id}")
         return response_json
 
+    def close_session(self):
+        """
+        Logs out of the current session, invalidating the session tokens.
+        """
+        logger.info("Closing session...")
+        try:
+            self._request("DELETE", "session", auto_renew_session=False)
+            self.cst = None
+            self.security_token = None
+            self.session.headers.pop("CST", None)
+            self.session.headers.pop("X-SECURITY-TOKEN", None)
+            logger.success("Session closed and client tokens cleared.")
+        except Exception as e:
+            logger.error(f"Failed to close session cleanly: {e}")
+
+    # --------------------------------------------------------------------------
+    # --- Market and Instrument Endpoints ---
+    # --------------------------------------------------------------------------
+
     def get_market_categories(self) -> MarketNavigationResponse:
-        """Returns top-level market categories (GET /marketnavigation)."""
+        """
+        Retrieves the top-level market navigation categories.
+
+        Returns:
+            MarketNavigationResponse: A Pydantic model with a list of market nodes.
+        """
         logger.info("Fetching market categories...")
         data = self._request("GET", "marketnavigation")
         return MarketNavigationResponse(**data)
 
     def get_markets_by_category(self, node_id: str) -> Dict[str, Any]:
-        """Returns all instruments for a given category (node)."""
+        """
+        Retrieves all sub-nodes and markets for a given category node ID.
+
+        Args:
+            node_id (str): The ID of the market category node.
+
+        Returns:
+            Dict[str, Any]: The raw JSON response containing sub-nodes and markets.
+        """
         logger.info(f"Fetching instruments from category '{node_id}'...")
         return self._request("GET", f"marketnavigation/{node_id}")
 
     def search_markets(self, search_term: str) -> SearchMarketsResponse:
-        """Searches for instruments by a given term (GET /markets)."""
+        """
+        Searches for markets by a term. Returns a list of flat market summaries.
+
+        Args:
+            search_term (str): The term to search for (e.g., 'Gold', 'Tesla').
+
+        Returns:
+            SearchMarketsResponse: A Pydantic model with a list of flat MarketSummary objects.
+        """
         logger.info(f"Searching for markets with term: '{search_term}'...")
         data = self._request("GET", "markets", params={"searchTerm": search_term})
         return SearchMarketsResponse(**data)
 
     def get_markets_by_epics(self, epics: List[str]) -> GetMarketsByEpicsResponse:
+        """
+        Fetches detailed market data for a list of epics in a single bulk request.
+
+        Args:
+            epics (List[str]): A list of epic identifiers (max 50).
+
+        Returns:
+            GetMarketsByEpicsResponse: A Pydantic model with a list of nested FullMarketDetails objects.
+        """
         if not 1 <= len(epics) <= 50:
             raise ValueError("The number of epics must be between 1 and 50.")
         logger.info(f"Fetching market details for {len(epics)} epics in bulk...")
@@ -318,23 +418,38 @@ class CapitalComAPIClient:
         return GetMarketsByEpicsResponse(**data)
 
     def get_full_market_details(self, epic: str) -> FullMarketDetails:
-        """Returns detailed information for a single market (GET /markets/{epic})."""
+        """
+        Retrieves detailed (nested) information for a single market.
+
+        Args:
+            epic (str): The epic identifier of the instrument.
+
+        Returns:
+            FullMarketDetails: A Pydantic model with complete instrument details.
+        """
         logger.info(f"Fetching full market details for epic: {epic}")
         data = self._request("GET", f"markets/{epic}")
         return FullMarketDetails(**data)
 
-    def get_open_positions(self) -> Dict[str, Any]:
-        """Returns all open positions for the active account."""
-        return self._request("GET", "positions")
-
     def get_historical_prices(
         self, epic: str, resolution: str, max_items: int
     ) -> pd.DataFrame:
-        """Returns historical price data for a particular instrument."""
+        """
+        Retrieves historical price data for a specific instrument.
+
+        Args:
+            epic (str): The epic identifier of the instrument.
+            resolution (str): The candle resolution (e.g., 'HOUR', 'DAY').
+            max_items (int): The maximum number of candles to return.
+
+        Returns:
+            pd.DataFrame: A DataFrame with OHLCV data, indexed by timestamp.
+        """
         params = {"resolution": resolution, "max": max_items}
         data = self._request("GET", f"prices/{epic}", params=params)
         if not data.get("prices"):
             return pd.DataFrame()
+
         processed = [
             {
                 "timestamp": p["snapshotTimeUTC"],
@@ -347,6 +462,7 @@ class CapitalComAPIClient:
             for p in data["prices"]
             if p.get("openPrice") and p.get("openPrice").get("bid")
         ]
+
         df = pd.DataFrame(processed)
         if df.empty:
             return df
@@ -354,7 +470,30 @@ class CapitalComAPIClient:
         df.set_index("timestamp", inplace=True)
         return df
 
+    # --------------------------------------------------------------------------
+    # --- Positions and Orders Endpoints ---
+    # --------------------------------------------------------------------------
+
+    def get_open_positions(self) -> Dict[str, Any]:
+        """
+        Retrieves all open positions for the active account.
+
+        Returns:
+            Dict[str, Any]: The raw JSON response from the server.
+        """
+        return self._request("GET", "positions")
+
+    # --------------------------------------------------------------------------
+    # --- Watchlist Endpoints ---
+    # --------------------------------------------------------------------------
+
     def get_watchlists(self) -> GetWatchlistsResponse:
+        """
+        Retrieves all watchlists for the current user.
+
+        Returns:
+            GetWatchlistsResponse: A Pydantic model with a list of watchlists.
+        """
         logger.info("Fetching all watchlists...")
         data = self._request("GET", "watchlists")
         return GetWatchlistsResponse(**data)
@@ -362,6 +501,16 @@ class CapitalComAPIClient:
     def create_watchlist(
         self, name: str, epics: List[str] = None
     ) -> CreateWatchlistResponse:
+        """
+        Creates a new watchlist, optionally populating it with epics.
+
+        Args:
+            name (str): The name for the new watchlist (max 20 chars).
+            epics (List[str], optional): A list of epics to add initially.
+
+        Returns:
+            CreateWatchlistResponse: A Pydantic model with the new watchlist ID.
+        """
         logger.info(f"Creating new watchlist with name: '{name}'...")
         payload = {"name": name}
         if epics:
@@ -370,35 +519,60 @@ class CapitalComAPIClient:
         return CreateWatchlistResponse(**data)
 
     def get_watchlist_details(self, watchlist_id: str) -> GetWatchlistDetailsResponse:
+        """
+        Retrieves the contents (list of markets) for a specific watchlist.
+
+        Args:
+            watchlist_id (str): The ID of the watchlist to fetch.
+
+        Returns:
+            GetWatchlistDetailsResponse: A Pydantic model with a list of markets.
+        """
         logger.info(f"Fetching details for watchlist ID: {watchlist_id}...")
         data = self._request("GET", f"watchlists/{watchlist_id}")
         return GetWatchlistDetailsResponse(**data)
 
     def add_to_watchlist(self, watchlist_id: str, epic: str) -> StatusResponse:
+        """
+        Adds a single instrument (epic) to an existing watchlist.
+
+        Args:
+            watchlist_id (str): The ID of the target watchlist.
+            epic (str): The epic of the instrument to add.
+
+        Returns:
+            StatusResponse: A Pydantic model indicating success or failure.
+        """
         logger.info(f"Adding epic '{epic}' to watchlist '{watchlist_id}'...")
         payload = {"epic": epic}
         data = self._request("PUT", f"watchlists/{watchlist_id}", json=payload)
         return StatusResponse(**data)
 
     def remove_from_watchlist(self, watchlist_id: str, epic: str) -> StatusResponse:
+        """
+        Removes a single instrument (epic) from a watchlist.
+
+        Args:
+            watchlist_id (str): The ID of the target watchlist.
+            epic (str): The epic of the instrument to remove.
+
+        Returns:
+            StatusResponse: A Pydantic model indicating success or failure.
+        """
         logger.info(f"Removing epic '{epic}' from watchlist '{watchlist_id}'...")
         data = self._request("DELETE", f"watchlists/{watchlist_id}/{epic}")
         return StatusResponse(**data)
 
     def delete_watchlist(self, watchlist_id: str) -> StatusResponse:
+        """
+        Deletes an entire watchlist.
+
+        Args:
+            watchlist_id (str): The ID of the watchlist to delete.
+
+        Returns:
+            StatusResponse: A Pydantic model indicating success or failure.
+        """
         logger.warning(f"Deleting entire watchlist with ID: '{watchlist_id}'...")
         data = self._request("DELETE", f"watchlists/{watchlist_id}")
         return StatusResponse(**data)
-
-    def close_session(self):
-        """Logs out of the current session (DELETE /session)."""
-        logger.info("Closing session...")
-        try:
-            self._request("DELETE", "session", auto_renew_session=False)
-            self.cst = None
-            self.security_token = None
-            self.session.headers.pop("CST", None)
-            self.session.headers.pop("X-SECURITY-TOKEN", None)
-            logger.success("Session closed and client tokens cleared.")
-        except Exception as e:
-            logger.error(f"Failed to close session cleanly: {e}")
