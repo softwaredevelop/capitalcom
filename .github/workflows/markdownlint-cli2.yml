@@ -35,7 +35,7 @@ jobs:
           fetch-depth: 0
 
       - name: Call markdownlint-cli2
-        uses: DavidAnson/markdownlint-cli2-action@v20
+        uses: DavidAnson/markdownlint-cli2-action@v21
         with:
           config: ".markdownlint-cli2.yaml"
           globs: "**/*.md"
